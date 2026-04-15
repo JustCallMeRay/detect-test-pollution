@@ -139,8 +139,8 @@ class PytestFramework(FrameWork):
         with open(results_json) as f:
             contents = json.load(f)
 
-        if test is not None:
-            return contents[test]
+        # if test is not None:
+        return contents[test]
 
 
 
@@ -194,11 +194,19 @@ def _fuzz(
 
             r.shuffle(testids)
 
+            with open(testids_filename, 'w') as f:
+                for testid in testids:
+                    f.write(f'{testid}\n')
             try:
-                # testids_filename = None, results_json=None
-                framework.does_test_list_pass(testpath, None, testids, 
-                    testids_filename=testids_filename, 
-                    results_json=results_json
+                framework._run_pytest(
+                    testpath,
+                    '--maxfail=1',
+                    # use `=` to avoid pytest's basedir detection
+                    f'{TESTIDS_INPUT_OPTION}={testids_filename}',
+                    f'{RESULTS_OUTPUT_OPTION}={results_json}',
+                )
+                cout = _run_gtest(
+                    "--shuffle seed="
                 )
             except subprocess.CalledProcessError:
                 print('-> found failing test!')
