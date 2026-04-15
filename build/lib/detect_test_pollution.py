@@ -11,12 +11,8 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
-from abc import abstractmethod
-from typing import override, TYPE_CHECKING, Protocol
 
-# pytest is now an optional dep rather than a required one
-if TYPE_CHECKING:  # pragma: no branch
-    import pytest
+import pytest
 
 TESTIDS_INPUT_OPTION = '--dtp-testids-input-file'
 TESTIDS_OUTPUT_OPTION = '--dtp-testids-output-file'
@@ -29,124 +25,78 @@ PYTEST_OPTIONS = (
     '--quiet', '--quiet',
 )
 
-# pytest plugin, not moved
-def pytest_addoption(parser: "pytest.Parser") -> None:
+
+def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(TESTIDS_INPUT_OPTION)
     parser.addoption(TESTIDS_OUTPUT_OPTION)
     parser.addoption(RESULTS_OUTPUT_OPTION)
 
-# pytest plugin, not moved
+
 def pytest_collection_modifyitems(
-        config: "pytest.Config",
-        items: "list[pytest.Item]",
+        config: pytest.Config,
+        items: list[pytest.Item],
 ) -> None:
     read_option = config.getoption(TESTIDS_INPUT_OPTION)
     write_option = config.getoption(TESTIDS_OUTPUT_OPTION)
     if read_option is not None:
         by_id = {item.nodeid: item for item in items}
-        testids = PytestFramework()._parse_testids_file(read_option)
+        testids = _parse_testids_file(read_option)
         items[:] = [by_id[testid] for testid in testids]
     elif write_option is not None:
         with open(write_option, 'w', encoding='UTF-8') as f:
             for item in items:
                 f.write(f'{item.nodeid}\n')
-    
-# Still part of plugin
+
+
 class CollectResults:
     def __init__(self, filename: str) -> None:
         self.filename = filename
         self.results: dict[str, bool] = {}
 
-    def pytest_runtest_logreport(self, report: "pytest.TestReport") -> None:
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         if report.when == 'call':
             self.results[report.nodeid] = report.outcome == 'passed'
         elif report.outcome == 'failed':
             self.results[report.nodeid] = False
 
-    def pytest_terminal_summary(self, config: "pytest.Config") -> None:
+    def pytest_terminal_summary(self, config: pytest.Config) -> None:
         with open(self.filename, 'w') as f:
             f.write(json.dumps(self.results, indent=2))
 
-    def pytest_unconfigure(self, config: "pytest.Config") -> None:
+    def pytest_unconfigure(self, config: pytest.Config) -> None:
         config.pluginmanager.unregister(self)
 
-# Still part of plugin
-def pytest_configure(config: "pytest.Config") -> None:
+
+def pytest_configure(config: pytest.Config) -> None:
     results_filename = config.getoption(RESULTS_OUTPUT_OPTION)
     if results_filename is not None:
         config.pluginmanager.register(CollectResults(results_filename))
 
-class FrameWork(Protocol):
-    
-    @abstractmethod
-    def discover_tests(path:str) -> list[str]:
-        ...
 
-    @abstractmethod
-    def does_test_list_pass(path: str, test: str, testids: list[str], testids_filename = None, results_json=None) -> bool:
-        ...
+def _run_pytest(*args: str) -> None:
+    # XXX: this is potentially difficult to debug? maybe --verbose?
+    subprocess.check_call(
+        (sys.executable, '-mpytest', *PYTEST_OPTIONS, *args),
+        stdout=subprocess.DEVNULL,
+    )
 
-class PytestFramework(FrameWork):
 
-    def __init__(self):
-        self._tempdir_holder = tempfile.TemporaryDirectory()
-        self._tempdir = self._tempdir_holder.__enter__()
+def _parse_testids_file(filename: str) -> list[str]:
+    with open(filename) as f:
+        return [line for line in f.read().splitlines() if line]
 
-    def _run_pytest(self, *args: str) -> None:
-        # XXX: this is potentially difficult to debug? maybe --verbose?
-        subprocess.check_call(
-            (sys.executable, '-mpytest', *PYTEST_OPTIONS, *args),
-            stdout=subprocess.DEVNULL,
-        )
 
-    def _parse_testids_file(self, filename: str) -> list[str]:
-        with open(filename) as f:
-            return [line for line in f.read().splitlines() if line]
-
-    @override
-    def discover_tests(self, path: str) -> list[str]:
-        
-        testids_filename = os.path.join(self._tempdir, 'testids.txt')
-        self._run_pytest(
+def _discover_tests(path: str) -> list[str]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        testids_filename = os.path.join(tmpdir, 'testids.txt')
+        _run_pytest(
             path,
             # use `=` to avoid pytest's basedir detection
             f'{TESTIDS_OUTPUT_OPTION}={testids_filename}',
             '--collect-only',
         )
 
-        return self._parse_testids_file(testids_filename)
-    
-    @override
-    def does_test_list_pass(self, path: str, test: str|None, testids: list[str], testids_filename = None, results_json=None) -> bool:
-        testids_filename = testids_filename if testids_filename is not None else os.path.join(self._tempdir, 'testids.txt')
-        
-        with open(testids_filename, 'w') as f:
-            for testid in testids:
-                f.write(f'{testid}\n')
-            f.write(f'{test}\n')
-
-        results_json = results_json if results_json is not None else os.path.join(self._tempdir, 'results.json')
-
-        with contextlib.suppress(subprocess.CalledProcessError):
-            self._run_pytest(
-                path,
-                # '--maxfail=1',
-                # use `=` to avoid pytest's basedir detection
-                f'{TESTIDS_INPUT_OPTION}={testids_filename}',
-                f'{RESULTS_OUTPUT_OPTION}={results_json}',
-            )
-
-        with open(results_json) as f:
-            contents = json.load(f)
-
-        if test is not None:
-            return contents[test]
-
-
-
-class GtestFramework: ...
-
-# assert is_instance(GtestFramework(), FrameWork)
+        return _parse_testids_file(testids_filename)
 
 
 def _common_testpath(testids: list[str]) -> str:
@@ -155,6 +105,30 @@ def _common_testpath(testids: list[str]) -> str:
         return '.'
     else:
         return os.path.commonpath(paths) or '.'
+
+
+def _passed_with_testlist(path: str, test: str, testids: list[str]) -> bool:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        testids_filename = os.path.join(tmpdir, 'testids.txt')
+        with open(testids_filename, 'w') as f:
+            for testid in testids:
+                f.write(f'{testid}\n')
+            f.write(f'{test}\n')
+
+        results_json = os.path.join(tmpdir, 'results.json')
+
+        with contextlib.suppress(subprocess.CalledProcessError):
+            _run_pytest(
+                path,
+                # use `=` to avoid pytest's basedir detection
+                f'{TESTIDS_INPUT_OPTION}={testids_filename}',
+                f'{RESULTS_OUTPUT_OPTION}={results_json}',
+            )
+
+        with open(results_json) as f:
+            contents = json.load(f)
+
+        return contents[test]
 
 
 def _format_cmd(
@@ -177,7 +151,6 @@ def _fuzz(
         testids: list[str],
         cmd_tests: str | None,
         cmd_testids_filename: str | None,
-        framework
 ) -> int:
     # make shuffling "deterministic"
     r = random.Random()
@@ -193,12 +166,17 @@ def _fuzz(
             print(f'run {i}...')
 
             r.shuffle(testids)
+            with open(testids_filename, 'w') as f:
+                for testid in testids:
+                    f.write(f'{testid}\n')
 
             try:
-                # testids_filename = None, results_json=None
-                framework.does_test_list_pass(testpath, None, testids, 
-                    testids_filename=testids_filename, 
-                    results_json=results_json
+                _run_pytest(
+                    testpath,
+                    '--maxfail=1',
+                    # use `=` to avoid pytest's basedir detection
+                    f'{TESTIDS_INPUT_OPTION}={testids_filename}',
+                    f'{RESULTS_OUTPUT_OPTION}={results_json}',
                 )
             except subprocess.CalledProcessError:
                 print('-> found failing test!')
@@ -217,14 +195,14 @@ def _fuzz(
             return 1
 
 
-def _bisect(testpath: str, failing_test: str, testids: list[str], framework : FrameWork ) -> int:
+def _bisect(testpath: str, failing_test: str, testids: list[str]) -> int:
     if failing_test not in testids:
         print('-> failing test was not part of discovered tests!')
         return 1
 
     # step 2: make sure the failing test passes on its own
     print('ensuring test passes by itself...')
-    if framework.does_test_list_pass(testpath, failing_test, []):
+    if _passed_with_testlist(testpath, failing_test, []):
         print('-> OK!')
     else:
         print('-> test failed! (output printed above)')
@@ -235,7 +213,7 @@ def _bisect(testpath: str, failing_test: str, testids: list[str], framework : Fr
 
     # step 3: ensure test fails
     print('ensuring test fails with test group...')
-    if framework.does_test_list_pass(testpath, failing_test, testids):
+    if _passed_with_testlist(testpath, failing_test, testids):
         print('-> expected failure -- but it passed?')
         return 1
     else:
@@ -254,14 +232,14 @@ def _bisect(testpath: str, failing_test: str, testids: list[str], framework : Fr
         part1 = testids[:pivot]
         part2 = testids[pivot:]
 
-        if framework.does_test_list_pass(testpath, failing_test, part1):
+        if _passed_with_testlist(testpath, failing_test, part1):
             testids = part2
         else:
             testids = part1
 
     # step 5: make sure it still fails
     print('double checking we found it...')
-    if framework.does_test_list_pass(testpath, failing_test, testids):
+    if _passed_with_testlist(testpath, failing_test, testids):
         raise AssertionError('unreachable? unexpected pass? report a bug?')
     else:
         print(f'-> the polluting test is: {testids[0]}')
@@ -270,9 +248,6 @@ def _bisect(testpath: str, failing_test: str, testids: list[str], framework : Fr
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-
-    # for now always
-    pytest_framework = PytestFramework()
 
     mutex1 = parser.add_mutually_exclusive_group(required=True)
     mutex1.add_argument(
@@ -302,18 +277,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # step 1: discover all the tests
     print('discovering all tests...')
     if args.testids_file:
-        testids = pytest_framework._parse_testids_file(args.testids_file)
+        testids = _parse_testids_file(args.testids_file)
         print(f'-> pre-discovered {len(testids)} tests!')
     else:
-        testids = pytest_framework.discover_tests(args.tests)
+        testids = _discover_tests(args.tests)
         print(f'-> discovered {len(testids)} tests!')
 
     testpath = _common_testpath(testids)
 
     if args.fuzz:
-        return _fuzz(testpath, testids, args.tests, args.testids_file, pytest_framework)
+        return _fuzz(testpath, testids, args.tests, args.testids_file)
     else:
-        return _bisect(testpath, args.failing_test, testids, pytest_framework)
+        return _bisect(testpath, args.failing_test, testids)
 
 
 if __name__ == '__main__':
