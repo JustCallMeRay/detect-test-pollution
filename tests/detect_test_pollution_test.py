@@ -6,7 +6,6 @@ import pytest
 
 import detect_test_pollution
 from detect_test_pollution import _common_testpath
-from detect_test_pollution import _format_cmd
 from detect_test_pollution import PytestFramework
 from detect_test_pollution import main
 
@@ -164,16 +163,16 @@ def test_passed_with_testlist_passing(tmp_path):
     assert PytestFramework().does_test_list_pass(f, 't.py::test2', ['t.py::test1']) is True
 
 
-def test_format_cmd_with_tests():
-    ret = _format_cmd('t.py::test1', 'this t.py', None)
+def test_create_cmd_tests():
+    ret = PytestFramework().create_cmd_to_run('t.py::test1', 'this t.py', None)
     assert ret == (
         'detect-test-pollution --failing-test t.py::test1 '
         "--tests 'this t.py'"
     )
 
 
-def test_format_cmd_with_testids_filename():
-    ret = _format_cmd('t.py::test1', None, 't.txt')
+def test_create_cmd_with_testids_filename():
+    ret = PytestFramework().create_cmd_to_run('t.py::test1', None, 't.txt')
     assert ret == (
         'detect-test-pollution --failing-test t.py::test1 '
         '--testids-filename t.txt'

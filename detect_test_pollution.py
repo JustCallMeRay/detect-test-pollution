@@ -15,7 +15,7 @@ from abc import abstractmethod
 from typing import override, TYPE_CHECKING, Protocol
 
 # pytest is now an optional dep rather than a required one
-if TYPE_CHECKING:  # pragma: no branch
+if TYPE_CHECKING:
     import pytest
 
 TESTIDS_INPUT_OPTION = '--dtp-testids-input-file'
@@ -104,6 +104,35 @@ class PytestFramework(FrameWork):
             return [line for line in f.read().splitlines() if line]
 
     @override
+    def fast_fail(self, path:str, testids: list[str], prng:random.Random) -> str:
+        """Runs tests, retruns first test that failed"""
+        testids_filename = os.path.join(self._tempdir, 'testids.txt')
+        results_json = os.path.join(self._tempdir, 'results.json')
+
+        prng.shuffle(testids)
+
+        with open(testids_filename, 'w') as f:
+            for testid in testids:
+                f.write(f'{testid}\n')
+        try:
+            self._run_pytest(
+                path,
+                '--maxfail=1',
+                # use `=` to avoid pytest's basedir detection
+                f'{TESTIDS_INPUT_OPTION}={testids_filename}',
+                f'{RESULTS_OUTPUT_OPTION}={results_json}',
+            )
+        except subprocess.CalledProcessError:
+            with open(results_json) as f:
+                contents = json.load(f)
+
+            testids = list(contents)
+            return testids[-1]
+        else:
+            return ""
+        
+
+    @override
     def discover_tests(self, path: str) -> list[str]:
         
         testids_filename = os.path.join(self._tempdir, 'testids.txt')
@@ -117,15 +146,15 @@ class PytestFramework(FrameWork):
         return self._parse_testids_file(testids_filename)
     
     @override
-    def does_test_list_pass(self, path: str, test: str|None, testids: list[str], testids_filename = None, results_json=None) -> bool:
-        testids_filename = testids_filename if testids_filename is not None else os.path.join(self._tempdir, 'testids.txt')
+    def does_test_list_pass(self, path: str, test: str|None, testids: list[str]) -> bool:
+        testids_filename = os.path.join(self._tempdir, 'testids.txt')
         
         with open(testids_filename, 'w') as f:
             for testid in testids:
                 f.write(f'{testid}\n')
             f.write(f'{test}\n')
 
-        results_json = results_json if results_json is not None else os.path.join(self._tempdir, 'results.json')
+        results_json = os.path.join(self._tempdir, 'results.json')
 
         with contextlib.suppress(subprocess.CalledProcessError):
             self._run_pytest(
@@ -139,15 +168,27 @@ class PytestFramework(FrameWork):
         with open(results_json) as f:
             contents = json.load(f)
 
-        # if test is not None:
         return contents[test]
+
+    @override
+    def create_cmd_to_run(
+            self,
+            victim: str,
+            cmd_tests: str | None,
+            cmd_testids_filename: str | None,
+    ) -> str:
+        args = ['detect-test-pollution', '--failing-test', victim]
+        if cmd_tests is not None:
+            args.extend(('--tests', cmd_tests))
+        elif cmd_testids_filename is not None:
+            args.extend(('--testids-filename', cmd_testids_filename))
+        else:
+            raise AssertionError('unreachable?')
+        return shlex.join(args)
 
 
 
 class GtestFramework: ...
-
-# assert is_instance(GtestFramework(), FrameWork)
-
 
 def _common_testpath(testids: list[str]) -> str:
     paths = [testid.split('::')[0] for testid in testids]
@@ -155,21 +196,6 @@ def _common_testpath(testids: list[str]) -> str:
         return '.'
     else:
         return os.path.commonpath(paths) or '.'
-
-
-def _format_cmd(
-        victim: str,
-        cmd_tests: str | None,
-        cmd_testids_filename: str | None,
-) -> str:
-    args = ['detect-test-pollution', '--failing-test', victim]
-    if cmd_tests is not None:
-        args.extend(('--tests', cmd_tests))
-    elif cmd_testids_filename is not None:
-        args.extend(('--testids-filename', cmd_testids_filename))
-    else:
-        raise AssertionError('unreachable?')
-    return shlex.join(args)
 
 
 def _fuzz(
@@ -192,35 +218,18 @@ def _fuzz(
             i += 1
             print(f'run {i}...')
 
-            r.shuffle(testids)
-
-            with open(testids_filename, 'w') as f:
-                for testid in testids:
-                    f.write(f'{testid}\n')
-            try:
-                framework._run_pytest(
-                    testpath,
-                    '--maxfail=1',
-                    # use `=` to avoid pytest's basedir detection
-                    f'{TESTIDS_INPUT_OPTION}={testids_filename}',
-                    f'{RESULTS_OUTPUT_OPTION}={results_json}',
-                )
-                cout = _run_gtest(
-                    "--shuffle seed="
-                )
-            except subprocess.CalledProcessError:
-                print('-> found failing test!')
-            else:
+            failing_test = framework.fast_fail( testpath, testids , r)
+            if failing_test == "":
                 print('-> OK!')
                 continue
+            else:
+                print('-> found failing test!')
+            
+            last_test_ran = testids.index(failing_test)
+            testids = testids[:last_test_ran]
+            victim = failing_test
 
-            with open(results_json) as f:
-                contents = json.load(f)
-
-            testids = list(contents)
-            victim = testids[-1]
-
-            cmd = _format_cmd(victim, cmd_tests, cmd_testids_filename)
+            cmd = framework.create_cmd_to_run(victim, cmd_tests, cmd_testids_filename)
             print(f'try `{cmd}`!')
             return 1
 
