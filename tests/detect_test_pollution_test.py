@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -156,6 +157,8 @@ def test_discover_tests(tmp_path, pytest_framework):
     ),
 )
 def test_common_testpath(inputs, expected):
+    if os.name == 'nt':
+        expected = expected.replace('/', '\\')
     assert _common_testpath(inputs) == expected
 
 
@@ -364,6 +367,8 @@ def test_k2():
     assert ret == 1
 
     out, err = capsys.readouterr()
+    if os.name == 'nt':
+        f = str(f).replace("'", "")
     assert out == f'''\
 discovering all tests...
 -> discovered 4 tests!
