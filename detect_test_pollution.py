@@ -234,7 +234,130 @@ class PytestFramework:
             raise AssertionError('unreachable?')
         return shlex.join(args)
 
+class GtestFramework:
+    def __init__(self) -> None:
+        self._tempdir_manager = tempfile.TemporaryDirectory()
+        self._tempdir: None | str = None
 
+    def __enter__(self) -> GtestFramework:
+        self._tempdir = self._tempdir_manager.__enter__()
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        value: BaseException | None, traceback: TracebackType | None,
+    ) -> None:
+        self._tempdir_manager.__exit__(exception_type, value, traceback)
+
+    def _run_gtest(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def _parse_results_json(self, results_json: str) -> dict[str, bool]:
+        """Parse gtest JSON output into a {test_id: passed} mapping."""
+        with open(results_json) as f:
+            data = json.load(f)
+        results: dict[str, bool] = {}
+        for suite in data.get('testsuites', []):
+            suite_name = suite['name']
+            for test in suite.get('testsuite', []):
+                test_id = f'{suite_name}.{test["name"]}'
+                results[test_id] = not bool(test.get('failures'))
+        return results
+
+    def discover_tests(self, path: str) -> list[str]:
+        result = subprocess.run(
+            (path, '--gtest_list_tests'),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f'Failed to list gtest tests: {result.stderr}')
+
+        tests = []
+        current_suite = ''
+        for line in result.stdout.splitlines():
+            if line.endswith('.'):
+                current_suite = line.strip()
+            elif line.startswith((' ', '\t')):
+                # strip trailing type-param / value-param comments
+                test_name = line.strip().split(' ')[0]
+                tests.append(f'{current_suite}{test_name}')
+        return tests
+
+    def does_test_list_pass(
+        self,
+        path: str,
+        test: str | None,
+        testids: list[str],
+    ) -> bool:
+        assert self._tempdir is not None
+        results_json = os.path.join(self._tempdir, 'results.json')
+
+        all_tests = list(testids)
+        if test is not None:
+            all_tests.append(test)
+        gtest_filter = ':'.join(all_tests)
+
+        with contextlib.suppress(subprocess.CalledProcessError):
+            subprocess.check_call(
+                (
+                    path,
+                    f'--gtest_filter={gtest_filter}',
+                    f'--gtest_output=json:{results_json}',
+                ),
+                stdout=subprocess.DEVNULL,
+            )
+
+        results = self._parse_results_json(results_json)
+        if test is not None:
+            return results.get(test, False)
+        return all(results.values())
+
+    def fast_fail(
+        self,
+        path: str,
+        testids: list[str],
+        prng: random.Random,
+    ) -> str:
+        """Run the test list in a shuffled order; return the first failing test ID or ''."""
+        assert self._tempdir is not None
+        prng.shuffle(testids)
+        gtest_filter = ':'.join(testids)
+        results_json = os.path.join(self._tempdir, 'results.json')
+
+        try:
+            subprocess.check_call(
+                (
+                    path,
+                    f'--gtest_filter={gtest_filter}',
+                    f'--gtest_output=json:{results_json}',
+                ),
+                stdout=subprocess.DEVNULL,
+            )
+            return ''
+        except subprocess.CalledProcessError:
+            results = self._parse_results_json(results_json)
+            # Return the first failing test in the shuffled order
+            for testid in testids:
+                if not results.get(testid, True):
+                    return testid
+            return ''
+
+    def create_cmd_to_run(
+        self,
+        victim: str,
+        cmd_tests: str | None,
+        cmd_testids_filename: str | None,
+    ) -> str:
+        args = ['detect-test-pollution', '--failing-test', victim]
+        if cmd_tests is not None:
+            args.extend(('--tests', cmd_tests))
+        elif cmd_testids_filename is not None:
+            args.extend(('--testids-filename', cmd_testids_filename))
+        else:
+            raise AssertionError('unreachable?')
+        return shlex.join(args)
 def _common_testpath(testids: list[str]) -> str:
     paths = [testid.split('::')[0] for testid in testids]
     if not paths:
