@@ -358,7 +358,7 @@ class GtestFramework:
         else:
             raise AssertionError('unreachable?')
         return shlex.join(args)
-    
+
 def _common_testpath(testids: list[str]) -> str:
     paths = [testid.split('::')[0] for testid in testids]
     if not paths:
